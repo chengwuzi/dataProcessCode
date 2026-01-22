@@ -2,10 +2,17 @@
 """
 HDBSCAN auto analysis + auto parameter selection for segment embeddings.
 
-Adds progress printing + ETA for HDBSCAN trials and timing for major stages.
+✅ Refactor per your request:
+- Stage timing prints
+- HDBSCAN trials progress + ETA
+- ✅ Parameter search uses SUBSAMPLE (fast)
+- ✅ After best params found, run ONE FULL-DATA HDBSCAN to output final labels/probs
+- ✅ Avoid DBCV heavy/unstable computation by default (can re-enable)
+- ✅ Reduce memory explosion risks: core_dist_n_jobs=1, prediction_data=False during search
+- ✅ You can set SEARCH_SAMPLE large for "quality first"
 
 Usage:
-  1) pip install -U numpy scipy scikit-learn hdbscan torch
+  1) conda/pip install numpy scipy scikit-learn hdbscan torch
   2) python hdbscan_auto_tune.py
 
 Input supports:
@@ -23,37 +30,55 @@ from typing import Dict, Any, Tuple, Optional, List
 
 import numpy as np
 
+
 # -------------------- You only edit these --------------------
-EMB_PATH = r"lightgcn_best.pt"   # segment(user) embedding path (pt/npy/npz)
-OUT_DIR  = r"hdbscan_out"               # output folder
+EMB_PATH = r"lightgcn_best.pt"    # segment(user) embedding path (pt/npy/npz)
+OUT_DIR  = r"hdbscan_out"         # output folder
 RANDOM_SEED = 2026
 
 # Preprocess
 L2_NORMALIZE = True
 PCA_ENABLE = True
-PCA_MAX_DIM = 50            # we will pick <= this
-PCA_MIN_DIM = 20            # we will pick >= this (for stability)
-PCA_DIM_CANDIDATES = [20, 30, 40, 50]  # will test a few and choose
+PCA_MAX_DIM = 50
+PCA_MIN_DIM = 20
+PCA_DIM_CANDIDATES = [20, 30, 40, 50]
 
 # kNN stats
 KNN_K_LIST = [5, 10, 15, 20]
-KNN_SAMPLE = 20000          # sample size for kNN stats (speed); set to None to use all
+KNN_SAMPLE = 30000                # sample size for kNN stats; None => all
 
 # Hopkins test (clustering tendency)
-HOPKINS_SAMPLE = 5000       # sample size; lower = faster
+HOPKINS_SAMPLE = 8000
 
-# HDBSCAN parameter search grid
-MIN_CLUSTER_SIZE_GRID = [8, 10, 15, 20, 30, 50, 80]
-MIN_SAMPLES_GRID      = [5, 10, 15, 20]
-SELECTION_METHODS     = ["eom", "leaf"]   # leaf tends to produce more small clusters
+# ---------------- HDBSCAN Search Strategy ----------------
+# ✅ Search on subset (speed) then final fit on full data (quality)
+SEARCH_SAMPLE = 50000             # <-- 你说“采样大一点”：建议 50k~80k；90k 全量会非常慢
+SEARCH_WITH_FULL_DATA = False     # 不建议 True（会回到 8 小时级）
 
-# Target preferences (soft constraints)
-TARGET_NOISE_RANGE = (0.40, 0.90)         # noise is OK; too low often means "one big blob"
-TARGET_CLUSTER_RANGE = (30, 8000)         # for 100k segments, typical reasonable range
+# During search we turn off prediction_data to reduce memory overhead
+SEARCH_PREDICTION_DATA = False
+
+# Final full fit: if you want membership probabilities, keep True
+FINAL_PREDICTION_DATA = True
+
+# HDBSCAN parameter grid
+MIN_CLUSTER_SIZE_GRID = [10, 15, 20, 30, 50]  # 你可以加到 120/200（更保守）
+MIN_SAMPLES_GRID      = [5, 10, 15]
+SELECTION_METHODS     = ["leaf", "eom"]            # leaf => more small clusters
+
+# Soft preferences
+TARGET_NOISE_RANGE = (0.40, 0.95)   # 你这里强共识簇 + 大噪声是合理的
+TARGET_CLUSTER_RANGE = (30, 8000)
 TOPK_CLUSTER_REPORT = 30
 
 # If you want faster search:
-MAX_TRIALS = None  # set e.g. 30 to cap trials; None = exhaustive grid
+MAX_TRIALS = 24  # set e.g. 20/30; None = full grid
+
+# Validity index (DBCV) is heavy and may overflow/slow on Windows -> OFF by default
+USE_DBCV = False
+
+# HDBSCAN parallelism: on Windows + joblib, too many processes often explodes memory
+CORE_DIST_N_JOBS = 1
 # ------------------------------------------------------------
 
 
@@ -78,11 +103,13 @@ def _fmt_hms(sec: float) -> str:
 
 def load_embeddings(path: str) -> np.ndarray:
     ext = os.path.splitext(path)[1].lower()
+
     if ext == ".npy":
         x = np.load(path)
         if not isinstance(x, np.ndarray):
             raise ValueError("Invalid .npy content.")
         return x
+
     if ext == ".npz":
         z = np.load(path)
         if "emb" in z:
@@ -90,7 +117,9 @@ def load_embeddings(path: str) -> np.ndarray:
         for k in z.files:
             return z[k]
         raise ValueError("Empty .npz.")
+
     if ext == ".pt":
+        # torch is optional unless .pt is used
         import torch
         obj = torch.load(path, map_location="cpu")
         if isinstance(obj, torch.Tensor):
@@ -106,6 +135,7 @@ def load_embeddings(path: str) -> np.ndarray:
         raise ValueError(
             f"Unrecognized .pt format: keys={list(obj.keys()) if isinstance(obj, dict) else type(obj)}"
         )
+
     raise ValueError(f"Unsupported embedding format: {ext}")
 
 
@@ -148,8 +178,8 @@ def choose_pca_dim(x: np.ndarray) -> Tuple[int, Dict[str, Any]]:
     """
     Heuristic:
       - try candidate dims
-      - prefer the smallest dim achieving decent variance (>=0.85), else pick the best among candidates
-      - clamp between PCA_MIN_DIM and PCA_MAX_DIM
+      - prefer smallest dim achieving variance >= 0.85
+      - else pick best variance among candidates
     """
     best = None
     records = []
@@ -188,7 +218,7 @@ def knn_distance_stats(x: np.ndarray, k_list: List[int], sample_n: Optional[int]
     nn.fit(xs)
 
     t0 = time.time()
-    dists, _ = nn.kneighbors(xs, return_distance=True)  # includes self at 0
+    dists, _ = nn.kneighbors(xs, return_distance=True)
     t1 = time.time()
 
     for k in k_list:
@@ -254,8 +284,8 @@ def compute_compactness_separation(
     x: np.ndarray, labels: np.ndarray, sample_per_cluster: int = 200
 ) -> Tuple[float, float]:
     """
-    Compactness: average cosine similarity to centroid within clusters (higher better).
-    Separation: average cosine distance between cluster centroids (higher better).
+    Compactness: avg cosine sim to centroid within clusters (higher better).
+    Separation: avg cosine distance between cluster centroids (higher better).
     Requires x to be L2-normalized.
     """
     mask = labels >= 0
@@ -317,11 +347,13 @@ def evaluate_hdbscan(x: np.ndarray, clusterer) -> ClusterQuality:
     compactness, separation = compute_compactness_separation(x, labels)
 
     dbcv = None
-    try:
-        from hdbscan.validity import validity_index
-        dbcv = float(validity_index(x, labels))
-    except Exception:
-        dbcv = None
+    if USE_DBCV:
+        try:
+            from hdbscan.validity import validity_index
+            # may overflow / be slow -> use only if you insist
+            dbcv = float(validity_index(x, labels))
+        except Exception:
+            dbcv = None
 
     n_clusters = int(len(set(labels)) - (1 if -1 in labels else 0))
 
@@ -340,15 +372,16 @@ def evaluate_hdbscan(x: np.ndarray, clusterer) -> ClusterQuality:
     if n_clusters > cl_hi:
         cl_pen += (n_clusters - cl_hi) / max(cl_hi, 1)
 
+    # ✅ Score: do NOT rely on DBCV by default
     term_dbcv = (dbcv if dbcv is not None else 0.0)
     score = (
-        2.5 * term_dbcv +
-        1.2 * mean_persistence +
-        0.8 * mean_prob +
-        1.2 * compactness +
-        0.6 * separation -
-        2.0 * noise_pen -
-        1.5 * cl_pen
+        (0.8 * term_dbcv) +
+        (1.4 * mean_persistence) +
+        (0.9 * mean_prob) +
+        (1.3 * compactness) +
+        (0.7 * separation) -
+        (2.2 * noise_pen) -
+        (1.6 * cl_pen)
     )
 
     return ClusterQuality(
@@ -363,15 +396,37 @@ def evaluate_hdbscan(x: np.ndarray, clusterer) -> ClusterQuality:
     )
 
 
-def run_hdbscan_search(x: np.ndarray) -> Tuple[Dict[str, Any], Any]:
+def _subsample_for_search(x: np.ndarray) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """
+    Returns (x_search, idx) where idx maps x_search back to x.
+    If SEARCH_WITH_FULL_DATA is True, returns full x.
+    """
+    n = x.shape[0]
+    if SEARCH_WITH_FULL_DATA:
+        return x, None
+
+    m = int(SEARCH_SAMPLE) if SEARCH_SAMPLE is not None else n
+    m = min(m, n)
+    if m >= n:
+        return x, None
+
+    idx = np.random.choice(n, size=m, replace=False)
+    return x[idx], idx
+
+
+def run_hdbscan_search(x_full: np.ndarray) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Search params on x_search (subsample), return:
+      - search_result dict
+      - best_params dict {mcs, ms, method}
+    """
     import hdbscan
 
+    x_search, idx = _subsample_for_search(x_full)
+    print(f"[HDBSCAN] search data: {x_search.shape[0]:,} / full {x_full.shape[0]:,}")
+
     trials = []
-    grid = []
-    for mcs in MIN_CLUSTER_SIZE_GRID:
-        for ms in MIN_SAMPLES_GRID:
-            for sm in SELECTION_METHODS:
-                grid.append((mcs, ms, sm))
+    grid = [(mcs, ms, sm) for mcs in MIN_CLUSTER_SIZE_GRID for ms in MIN_SAMPLES_GRID for sm in SELECTION_METHODS]
 
     if MAX_TRIALS is not None and MAX_TRIALS < len(grid):
         grid = random.sample(grid, MAX_TRIALS)
@@ -380,7 +435,7 @@ def run_hdbscan_search(x: np.ndarray) -> Tuple[Dict[str, Any], Any]:
     print(f"[HDBSCAN] total trials: {total} (MAX_TRIALS={MAX_TRIALS})")
 
     best = None
-    best_clusterer = None
+    best_params = None
     search_start = time.time()
 
     for t, (mcs, ms, sm) in enumerate(grid, 1):
@@ -389,17 +444,17 @@ def run_hdbscan_search(x: np.ndarray) -> Tuple[Dict[str, Any], Any]:
         clusterer = hdbscan.HDBSCAN(
             min_cluster_size=int(mcs),
             min_samples=int(ms),
-            metric="euclidean",  # works well after normalize+PCA
+            metric="euclidean",              # works well after normalize+PCA
             cluster_selection_method=sm,
-            prediction_data=True,
-            core_dist_n_jobs=1,
+            prediction_data=SEARCH_PREDICTION_DATA,
+            core_dist_n_jobs=int(CORE_DIST_N_JOBS),
         )
 
         fit_t0 = time.time()
-        _ = clusterer.fit_predict(x)
+        _ = clusterer.fit_predict(x_search)
         fit_elapsed = time.time() - fit_t0
 
-        q = evaluate_hdbscan(x, clusterer)
+        q = evaluate_hdbscan(x_search, clusterer)
 
         rec = {
             "trial": t,
@@ -423,7 +478,11 @@ def run_hdbscan_search(x: np.ndarray) -> Tuple[Dict[str, Any], Any]:
 
         if best is None or q.score > best["quality"]["score"]:
             best = rec
-            best_clusterer = clusterer
+            best_params = {
+                "min_cluster_size": int(mcs),
+                "min_samples": int(ms),
+                "selection_method": sm,
+            }
 
         spent = time.time() - search_start
         avg = spent / t
@@ -436,11 +495,45 @@ def run_hdbscan_search(x: np.ndarray) -> Tuple[Dict[str, Any], Any]:
             f"clusters={q.n_clusters:<5d} noise={q.noise_ratio:.3f} "
             f"p={q.mean_prob:.3f} pers={q.mean_persistence:.3f} "
             f"dbcv={q.dbcv if q.dbcv is not None else 'NA'} score={q.score:.4f} "
-            f"fit={fit_elapsed:.1f}s  avg={avg:.1f}s  ETA={_fmt_hms(eta)}"
-            ,flush=True
+            f"fit={fit_elapsed:.1f}s  avg={avg:.1f}s  ETA={_fmt_hms(eta)}",
+            flush=True
         )
 
-    return {"best": best, "trials": trials}, best_clusterer
+    result = {
+        "search_on_subsample": (idx is not None),
+        "search_sample_n": int(x_search.shape[0]),
+        "full_n": int(x_full.shape[0]),
+        "use_dbcv": bool(USE_DBCV),
+        "search_prediction_data": bool(SEARCH_PREDICTION_DATA),
+        "core_dist_n_jobs": int(CORE_DIST_N_JOBS),
+        "best": best,
+        "best_params": best_params,
+        "trials": trials,
+    }
+    return result, best_params
+
+
+def fit_final_hdbscan(x_full: np.ndarray, best_params: Dict[str, Any]):
+    """
+    Run one full-data HDBSCAN with best_params.
+    """
+    import hdbscan
+
+    print("\n[HDBSCAN-FINAL] fitting on FULL data with best params ...")
+    print("[HDBSCAN-FINAL] params:", best_params)
+
+    final = hdbscan.HDBSCAN(
+        min_cluster_size=int(best_params["min_cluster_size"]),
+        min_samples=int(best_params["min_samples"]),
+        metric="euclidean",
+        cluster_selection_method=best_params["selection_method"],
+        prediction_data=FINAL_PREDICTION_DATA,
+        core_dist_n_jobs=int(CORE_DIST_N_JOBS),
+    )
+    t0 = time.time()
+    final.fit(x_full)
+    print(f"[HDBSCAN-FINAL] done. elapsed={time.time()-t0:.1f}s")
+    return final
 
 
 def summarize_clusters(clusterer, out_path: str, topk: int = 30):
@@ -461,10 +554,10 @@ def summarize_clusters(clusterer, out_path: str, topk: int = 30):
             pers_map[int(i)] = float(pv)
 
     out = {
-        "n_points": n,
-        "noise_points": noise,
-        "noise_ratio": noise / max(n, 1),
-        "n_clusters": len(clusters),
+        "n_points": int(n),
+        "noise_points": int(noise),
+        "noise_ratio": float(noise / max(n, 1)),
+        "n_clusters": int(len(clusters)),
         "top_clusters_by_size": [
             {
                 "cluster_id": int(cid),
@@ -484,6 +577,7 @@ def main():
     set_seed(RANDOM_SEED)
     ensure_dir(OUT_DIR)
 
+    # ----------------- Load -----------------
     print("Loading embeddings:", EMB_PATH)
     t_load = time.time()
     x = load_embeddings(EMB_PATH)
@@ -494,11 +588,10 @@ def main():
 
     stat0 = basic_stats(x)
     print("[BASIC]", stat0)
-
     if stat0["nan_count"] > 0 or stat0["inf_count"] > 0:
         raise ValueError("Embeddings contain NaN/Inf. Fix training/export first.")
 
-    # preprocess
+    # ----------------- Preprocess -----------------
     if L2_NORMALIZE:
         t_norm = time.time()
         x = l2_normalize(x)
@@ -510,14 +603,16 @@ def main():
         t_pca = time.time()
         dim, pca_info = choose_pca_dim(x_work)
         print(f"[PCA] choosing dim={dim}, detail={pca_info['chosen']}")
-        x_work, _ = pca_reduce(x_work, dim)
+        x_work, pca_fit_info = pca_reduce(x_work, dim)
         x_work = l2_normalize(x_work)
         print(f"[PCA] done. elapsed={time.time()-t_pca:.1f}s")
 
         with open(os.path.join(OUT_DIR, "pca_info.json"), "w", encoding="utf-8") as f:
             json.dump(pca_info, f, ensure_ascii=False, indent=2)
+        with open(os.path.join(OUT_DIR, "pca_fit_info.json"), "w", encoding="utf-8") as f:
+            json.dump(pca_fit_info, f, ensure_ascii=False, indent=2)
 
-    # kNN stats
+    # ----------------- kNN stats -----------------
     print("[kNN] computing distance stats ...")
     t_knn = time.time()
     knn_stats = knn_distance_stats(x_work, KNN_K_LIST, KNN_SAMPLE)
@@ -526,7 +621,7 @@ def main():
     print(f"[kNN] done. elapsed={time.time()-t_knn:.1f}s, kneighbors={knn_stats.get('kneighbors_elapsed_sec', None)}s")
     print("[kNN]", knn_stats["k_stats"])
 
-    # Hopkins
+    # ----------------- Hopkins -----------------
     print("[HOPKINS] computing ...")
     t_h = time.time()
     H = hopkins_statistic(x_work, HOPKINS_SAMPLE)
@@ -534,21 +629,27 @@ def main():
         json.dump({"hopkins": H, "sample": HOPKINS_SAMPLE}, f, ensure_ascii=False, indent=2)
     print(f"[HOPKINS] done. elapsed={time.time()-t_h:.1f}s, H={H:.4f} (0.5≈random, closer to 1 => more clusterable)")
 
-    # HDBSCAN search
+    # ----------------- HDBSCAN search (subsample) -----------------
     print("[HDBSCAN] searching best params ...")
     t_search = time.time()
-    search_result, best_clusterer = run_hdbscan_search(x_work)
+    search_result, best_params = run_hdbscan_search(x_work)
     print(f"[HDBSCAN] search done. elapsed={time.time()-t_search:.1f}s")
+
     with open(os.path.join(OUT_DIR, "hdbscan_search.json"), "w", encoding="utf-8") as f:
         json.dump(search_result, f, ensure_ascii=False, indent=2)
 
-    best = search_result["best"]
-    print("\n[BEST CONFIG]")
-    print(json.dumps(best, ensure_ascii=False, indent=2))
+    print("\n[BEST PARAMS]")
+    print(json.dumps(best_params, ensure_ascii=False, indent=2))
 
-    # Save labels/probabilities
-    labels = best_clusterer.labels_.astype(np.int32)
-    probs = getattr(best_clusterer, "probabilities_", None)
+    # ----------------- Final full fit (quality) -----------------
+    t_final = time.time()
+    final_clusterer = fit_final_hdbscan(x_work, best_params)
+    print(f"[HDBSCAN-FINAL] total elapsed={time.time()-t_final:.1f}s")
+
+    # ----------------- Save artifacts -----------------
+    labels = final_clusterer.labels_.astype(np.int32)
+    probs = getattr(final_clusterer, "probabilities_", None)
+
     np.save(os.path.join(OUT_DIR, "labels.npy"), labels)
     if probs is not None:
         np.save(os.path.join(OUT_DIR, "probs.npy"), probs.astype(np.float32))
@@ -556,8 +657,7 @@ def main():
     # Save reduced embedding used for clustering
     np.save(os.path.join(OUT_DIR, "emb_used.npy"), x_work.astype(np.float32))
 
-    # Summary
-    summarize_clusters(best_clusterer, os.path.join(OUT_DIR, "cluster_summary.json"), TOPK_CLUSTER_REPORT)
+    summarize_clusters(final_clusterer, os.path.join(OUT_DIR, "cluster_summary.json"), TOPK_CLUSTER_REPORT)
 
     # Overall report
     report = {
@@ -571,13 +671,20 @@ def main():
         },
         "knn_stats": knn_stats,
         "hopkins": H,
-        "best_config": best,
+        "hdbscan": {
+            "search_result": "hdbscan_search.json",
+            "best_params": best_params,
+            "search_sample": SEARCH_SAMPLE,
+            "search_prediction_data": SEARCH_PREDICTION_DATA,
+            "final_prediction_data": FINAL_PREDICTION_DATA,
+            "core_dist_n_jobs": CORE_DIST_N_JOBS,
+            "use_dbcv": USE_DBCV,
+        },
         "artifacts": {
             "labels": "labels.npy",
-            "probs": "probs.npy",
+            "probs": "probs.npy" if probs is not None else None,
             "emb_used": "emb_used.npy",
             "cluster_summary": "cluster_summary.json",
-            "search_log": "hdbscan_search.json",
         }
     }
     with open(os.path.join(OUT_DIR, "report.json"), "w", encoding="utf-8") as f:
@@ -586,7 +693,7 @@ def main():
     print("\n[DONE]")
     print("Saved to:", OUT_DIR)
     print(" - report.json")
-    print(" - labels.npy / probs.npy")
+    print(" - labels.npy", (" / probs.npy" if probs is not None else ""))
     print(" - emb_used.npy")
     print(" - cluster_summary.json")
     print(" - hdbscan_search.json")
