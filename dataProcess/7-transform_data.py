@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 import os
 
-IN_TRAIN = r"train.txt"   # 你现在的格式：segid: i1 i2 ...
-IN_TEST  = r"test.txt"    # 你现在的格式：segid: i_test
+IN_TRAIN = r"../dataset/electronics/train.txt"   # 你现在的格式：segid: i1 i2 ...
+IN_TEST  = r"../dataset/electronics/test.txt"    # 你现在的格式：segid: i_test
 
-OUT_TRAIN = r"train_edges.txt"  # LightGCN常用：u i 1
-OUT_TEST  = r"test_edges.txt"
+OUT_TRAIN = r"../dataset/electronics/train_edges.txt"  # LightGCN常用：u i 1
+OUT_TEST  = r"../dataset/electronics/test_edges.txt"
 
 def parse_train_line(line: str):
     # "123: 7 8 9"

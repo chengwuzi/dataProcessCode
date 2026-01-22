@@ -4,10 +4,10 @@ import os
 from collections import Counter
 
 # ================== 你只改这里 ==================
-IN_PATH = r"Sports_2019_2021_sorted_min10.jsonl"
-META_PATH = r"meta_Sports_and_Outdoors.jsonl"
+IN_PATH = r"Electronics_2019_2021_sorted_min15.jsonl"
+META_PATH = r"meta_Electronics.jsonl"
 
-OUT_PATH = r"Sports_2019_2021_sorted_min10_canon.jsonl"
+OUT_PATH = r"Electronics_2019_2021_sorted_min15_canon.jsonl"
 OUT_STATS = r"canon_item_id_stats.json"
 # ===============================================
 

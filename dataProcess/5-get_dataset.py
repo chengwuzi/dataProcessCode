@@ -4,7 +4,7 @@ import os
 from collections import defaultdict, Counter
 
 # ================== 你只改这里 ==================
-DATA_PATH = r"Sports_2019_2021_sorted_min10_canon.jsonl"
+DATA_PATH = r"Electronics_2019_2021_sorted_min15_canon.jsonl"
 
 OUT_SEGMENTS_JSONL = r"segments_all_with_aug.jsonl"
 OUT_TRAIN_TXT      = r"train.txt"

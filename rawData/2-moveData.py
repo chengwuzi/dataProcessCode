@@ -2,8 +2,8 @@
 import json
 from datetime import datetime
 
-INPUT_PATH = r"Sports_and_Outdoors.jsonl"
-OUTPUT_PATH = r"../dataProcess/Sports_2019_2021.jsonl"
+INPUT_PATH = r"Electronics.jsonl"
+OUTPUT_PATH = r"Electronics_2019_2021.jsonl"
 
 TARGET_YEARS = {2019, 2020, 2021}
 

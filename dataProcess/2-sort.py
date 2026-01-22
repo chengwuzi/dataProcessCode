@@ -19,10 +19,10 @@ import shutil  # 用于删除非空目录
 
 # ================= 配置区域 =================
 # 输入文件路径
-INPUT_PATH = r"Sports_2019_2021.jsonl"
+INPUT_PATH = r"../rawData/Electronics_2019_2021.jsonl"
 
 # 输出文件路径（排序后的文件）
-OUTPUT_PATH = r"Sports_2019_2021_sorted.jsonl"
+OUTPUT_PATH = r"Electronics_2019_2021_sorted.jsonl"
 
 # 临时文件夹路径（设为 None 则自动创建系统临时目录，跑完会自动删）
 # 如果你的C盘空间不够，可以指定一个大硬盘的路径，比如 r"D:\tmp_sort"

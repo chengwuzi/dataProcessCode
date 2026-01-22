@@ -1,0 +1,33 @@
+{
+  "config": {
+    "DATA_PATH": "Electronics_2019_2021_sorted_min15_canon.jsonl",
+    "COMPRESS_HOURS": 1,
+    "CUT_HOURS": 168,
+    "SEG_MIN": 2,
+    "SEG_MAX": 30,
+    "AUG_MIN_ITEMS": 12,
+    "AUG_SEG_MIN": 4,
+    "AUG_WINDOW_W": 8,
+    "MIN_ITEMS_FOR_SEG": 3,
+    "TEST_PICK_MODE": "last",
+    "SEED": 2026,
+    "FILTER_HOT_ITEMS": true,
+    "HOT_ITEM_SEG_RATIO": 0.01,
+    "HOT_ITEM_SEG_ABS": null
+  },
+  "users_seen": 30842,
+  "bursts_total": 321764,
+  "native_segments_kept": 70558,
+  "aug_segments_kept": 19636,
+  "segments_total": 90194,
+  "items_unique_total": 131624,
+  "native_large_triggered": 5404,
+  "aug_count_hist": {
+    "2": 477,
+    "3": 1026,
+    "4": 3901
+  },
+  "emit_ok_total": 90194,
+  "emit_skip_after_hot_filter_too_short": 59347,
+  "hot_items_count": 0
+}

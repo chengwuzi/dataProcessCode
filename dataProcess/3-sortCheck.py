@@ -2,10 +2,10 @@
 import json
 
 # ====== 你改这俩路径就行 ======
-INPUT_PATH = r"Sports_2019_2021_sorted.jsonl"
-OUTPUT_PATH = r"Sports_2019_2021_sorted_min10.jsonl"
+INPUT_PATH = r"Electronics_2019_2021_sorted.jsonl"
+OUTPUT_PATH = r"Electronics_2019_2021_sorted_min15.jsonl"
 
-MIN_INTERACTIONS = 10
+MIN_INTERACTIONS = 15
 
 # 如果你当时同用户是“新->旧”（timestamp 降序），把这个设为 True
 TIME_DESC = False

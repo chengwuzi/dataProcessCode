@@ -3,10 +3,10 @@ import json
 import os
 
 # ================== 你只改这里 ==================
-ITEM2INT_PATH = r"../dataset/sports/item2int.json"
-META_IN_PATH  = r"meta_Sports_and_Outdoors.jsonl"
+ITEM2INT_PATH = r"../dataset/electronics/item2int.json"
+META_IN_PATH  = r"meta_Electronics.jsonl"
 # META_OUT_PATH = r"../dataset/electronics/meta_Electronics_filtered.jsonl"
-META_OUT_PATH = r"../dataset/sports/meta_Sports_and_Outdoors_filtered.jsonl"
+META_OUT_PATH = r"../dataset/electronics/meta_Sports_and_Outdoors_filtered.jsonl"
 
 # 可选: "full" | "normal" | "minimal"
 MODE = "minimal"
